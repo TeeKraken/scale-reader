@@ -576,3 +576,10 @@ dialog::backdrop {
   grid-column: 1 / -1;
   margin: 0;
 }
+
+.reading.kept {
+  border-style: dashed;
+}
+.reading.kept .hint {
+  margin: 2px 0 0;
+}

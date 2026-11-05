@@ -27,8 +27,23 @@ let data: Data = store.data;
 /** The reading box while it's being dragged (saved when the drag ends). */
 let box: Box = { ...data.box };
 
+/** A number in the weigh-in being filled in, with the reading it was entered for as it was then. */
+interface DraftValue {
+  fieldId: string;
+  name: string;
+  unit: string;
+  value: string;
+}
 // The weigh-in being filled in, by field id. Not saved until "Save this weigh-in".
-let draft: Record<string, string> = {};
+let draft: Record<string, DraftValue> = {};
+/** Numbers whose reading another window removed or changed. Kept as entered, saved with their old name and unit. */
+let kept: DraftValue[] = [];
+
+function setDraft(f: { id: string; name: string; unit: string }, value: string) {
+  draft[f.id] = { fieldId: f.id, name: f.name.trim(), unit: f.unit.trim(), value };
+}
+const draftValue = (id: string) => draft[id]?.value ?? "";
+const draftStarted = () => Object.values(draft).some((d) => d.value.trim()) || kept.some((d) => d.value.trim());
 let active = 0;
 let whenEdited = false;
 /** Readings just added in setup: their "needs a name" note waits until you've left the box. */
@@ -108,9 +123,11 @@ function change(fn: (d: Data) => void) {
 // Another tab or the installed app saved: show its changes, keeping this page's unsaved weigh-in.
 window.addEventListener("storage", (e) => {
   if (e.key !== KEY && e.key !== null) return;
+  if (store.memoryOnly) return; // this page's copy is the only complete one now
   const focusedId = document.activeElement?.id;
   store.refresh();
   data = store.data;
+  keepChangedDraft();
   if (!drag) box = { ...data.box };
   if (active >= data.fields.length) active = Math.max(0, data.fields.length - 1);
   renderFields();
@@ -120,6 +137,56 @@ window.addEventListener("storage", (e) => {
   applyBox();
   if (focusedId) document.getElementById(focusedId)?.focus();
 });
+
+/**
+ * After another window changed the setup: a number typed for a reading that
+ * was removed there, or whose name or unit changed, is moved to "kept" rather
+ * than dropped or quietly relabelled.
+ */
+function keepChangedDraft() {
+  const moved: DraftValue[] = [];
+  for (const [id, d] of Object.entries(draft)) {
+    if (!d.value.trim()) continue;
+    const f = data.fields.find((x) => x.id === id);
+    if (f && f.name.trim() === d.name && f.unit.trim() === d.unit) continue;
+    moved.push(d);
+    delete draft[id];
+  }
+  if (!moved.length) return;
+  kept.push(...moved);
+  say(
+    `Your readings were changed in another window. ${moved.map((d) => `${label(d)} ${d.value}`).join(", ")} ${moved.length === 1 ? "is" : "are"} kept in this weigh-in under the old name, and will be saved like that. Clear a number to leave it out.`,
+  );
+}
+
+function renderKept() {
+  return kept.map((d, i) => {
+    const id = `k-${i}`;
+    const input = h("input", { id, type: "text", inputmode: "decimal", autocomplete: "off", spellcheck: "false", "aria-describedby": `${id}-note ${id}-err` });
+    input.value = d.value;
+    const err = h("span", { class: "field-error", id: `${id}-err` });
+    input.addEventListener("input", () => {
+      d.value = input.value;
+      err.textContent = "";
+      input.removeAttribute("aria-invalid");
+    });
+    input.addEventListener("blur", () => showValueError(input, err));
+    const drop = h("button", { type: "button", class: "btn btn-quiet btn-small btn-danger", "aria-label": `Leave ${label(d)} out of this weigh-in` }, "Leave out");
+    drop.addEventListener("click", () => {
+      kept.splice(i, 1);
+      renderReadings();
+      say(`Left ${label(d)} out of this weigh-in.`);
+    });
+    return h(
+      "li",
+      { class: "reading kept" },
+      h("label", { for: id }, label(d)),
+      h("p", { class: "hint", id: `${id}-note` }, "Changed or removed in another window. Kept with its old name and unit."),
+      h("div", { class: "reading-row" }, input, drop),
+      err,
+    );
+  });
+}
 
 // ---------- The weigh-in form ----------
 
@@ -136,11 +203,11 @@ function renderReadings() {
         enterkeyhint: "next",
         "aria-describedby": `${id}-err`,
       });
-      input.value = draft[f.id] ?? "";
+      input.value = draftValue(f.id);
       const err = h("span", { class: "field-error", id: `${id}-err` });
       input.addEventListener("input", () => {
         if (input.value.trim()) freshenWhen();
-        draft[f.id] = input.value;
+        setDraft(f, input.value);
         err.textContent = "";
         input.removeAttribute("aria-invalid");
       });
@@ -159,6 +226,7 @@ function renderReadings() {
         err,
       );
     }),
+    ...renderKept(),
   );
   updateReadButton();
 }
@@ -170,7 +238,7 @@ function renderReadings() {
  */
 function freshenWhen() {
   if (whenEdited) return;
-  if (Object.values(draft).some((v) => v.trim())) return;
+  if (draftStarted()) return;
   els.when.value = localStamp(new Date());
 }
 
@@ -206,6 +274,7 @@ function updateReadButton() {
 
 function resetDraft() {
   draft = {};
+  kept = [];
   active = 0;
   whenEdited = false;
   els.when.value = localStamp(new Date());
@@ -242,6 +311,13 @@ els.form.addEventListener("submit", (e) => {
     if (!ok && !firstBad) firstBad = input;
     const c = checkValue(input.value);
     return { fieldId: f.id, name: f.name.trim(), unit: f.unit.trim(), value: c.ok ? c.value : "" };
+  });
+  kept.forEach((d, i) => {
+    const input = $<HTMLInputElement>(`k-${i}`);
+    const ok = showValueError(input, $(`k-${i}-err`));
+    if (!ok && !firstBad) firstBad = input;
+    const c = checkValue(d.value);
+    if (c.ok && c.value) readings.push({ fieldId: d.fieldId, name: d.name, unit: d.unit, value: c.value });
   });
   if (firstBad) {
     els.formError.textContent = "Some readings aren't numbers. Fix the ones marked, or clear them to leave them out.";
@@ -319,6 +395,7 @@ function renderFields() {
           const g = d.fields.find((x) => x.id === fid);
           if (g) g.name = name.value;
         });
+        if (draft[fid]) draft[fid].name = name.value.trim();
         edited();
       });
       unit.addEventListener("input", () => {
@@ -326,6 +403,7 @@ function renderFields() {
           const g = d.fields.find((x) => x.id === fid);
           if (g) g.unit = unit.value;
         });
+        if (draft[fid]) draft[fid].unit = unit.value.trim();
         edited();
       });
       name.addEventListener("input", () => {
@@ -495,14 +573,26 @@ const camera = createCamera({
       audio: false,
       video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
     }),
-  attach: async (stream) => {
+  attach: async (stream, signal) => {
     els.video.srcObject = stream;
     await new Promise<void>((resolve, reject) => {
       if (els.video.readyState >= 1) return resolve();
-      const timer = setTimeout(() => reject(new Error("The camera sent no picture")), 15_000);
-      els.video.addEventListener("loadedmetadata", () => (clearTimeout(timer), resolve()), { once: true });
-      els.video.addEventListener("error", () => (clearTimeout(timer), reject(new Error("The video failed"))), { once: true });
+      const done = (fn: () => void) => () => {
+        clearTimeout(timer);
+        els.video.removeEventListener("loadedmetadata", onMeta);
+        els.video.removeEventListener("error", onError);
+        signal.removeEventListener("abort", onAbort);
+        fn();
+      };
+      const onMeta = done(resolve);
+      const onError = done(() => reject(new Error("The video failed")));
+      const onAbort = done(() => reject(new DOMException("Cancelled", "AbortError")));
+      const timer = setTimeout(done(() => reject(new Error("The camera sent no picture"))), 15_000);
+      els.video.addEventListener("loadedmetadata", onMeta);
+      els.video.addEventListener("error", onError);
+      signal.addEventListener("abort", onAbort);
     });
+    if (signal.aborted) throw new DOMException("Cancelled", "AbortError");
     await els.video.play();
   },
   detach: () => {
@@ -730,7 +820,7 @@ els.readBtn.addEventListener("click", () => {
     return;
   }
   freshenWhen();
-  draft[f.id] = r.text;
+  setDraft(f, r.text);
   input.value = r.text;
   showValueError(input, $(`r-${f.id}-err`));
   if (r.value === null || r.unsure) {
@@ -738,7 +828,7 @@ els.readBtn.addEventListener("click", () => {
     renderReadings();
     return;
   }
-  const next = data.fields.findIndex((x, i) => i > active && !(draft[x.id] ?? "").trim());
+  const next = data.fields.findIndex((x, i) => i > active && !draftValue(x.id).trim());
   const msg = `${label(f)}: read ${r.text}. Check it matches the scale.`;
   if (next >= 0) {
     active = next;

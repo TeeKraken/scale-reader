@@ -10,8 +10,11 @@ export type StartResult = "started" | "busy" | "cancelled" | { error: unknown; s
 
 export interface CameraDeps {
   getUserMedia: () => Promise<MediaStream>;
-  /** Shows the stream (sets the video's source and plays it). Throws if it can't. */
-  attach: (stream: MediaStream) => Promise<void>;
+  /**
+   * Shows the stream (sets the video's source and plays it). Throws if it can't.
+   * Must give up, cleaning up its listeners and timers, when `signal` aborts.
+   */
+  attach: (stream: MediaStream, signal: AbortSignal) => Promise<void>;
   /** Clears the video. */
   detach: () => void;
 }
@@ -24,6 +27,8 @@ export function createCamera(deps: CameraDeps) {
   let generation = 0;
   let pending = false;
   let current: MediaStream | null = null;
+  /** A stream we have but that isn't showing yet, with the means to abandon showing it. */
+  let attaching: { stream: MediaStream; abort: AbortController } | null = null;
 
   return {
     get running() {
@@ -48,11 +53,15 @@ export function createCamera(deps: CameraDeps) {
         stopTracks(stream);
         return "cancelled";
       }
+      const abort = new AbortController();
+      attaching = { stream, abort };
       try {
-        await deps.attach(stream);
+        await deps.attach(stream, abort.signal);
       } catch (error) {
         stopTracks(stream);
+        // Cancelled meanwhile: stop() already cleaned up, and a newer start may own the video now.
         if (mine !== generation) return "cancelled";
+        attaching = null;
         pending = false;
         deps.detach();
         return { error, stage: "playback" };
@@ -61,14 +70,20 @@ export function createCamera(deps: CameraDeps) {
         stopTracks(stream);
         return "cancelled";
       }
+      attaching = null;
       pending = false;
       current = stream;
       return "started";
     },
-    /** Stops the camera and cancels any start still waiting. */
+    /** Stops the camera at once, including one that's still waiting for permission or starting up. */
     stop() {
       generation++;
       pending = false;
+      if (attaching) {
+        stopTracks(attaching.stream);
+        attaching.abort.abort();
+        attaching = null;
+      }
       if (current) stopTracks(current);
       current = null;
       deps.detach();

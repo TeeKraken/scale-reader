@@ -71,4 +71,23 @@ describe("two windows on one phone", () => {
     expect(s.update((d) => d.sets.push(weighIn("2", "70")))).toBe(false);
     expect(s.data.sets).toHaveLength(2);
   });
+
+  it("after a failed save, keeps this page's data for good, even when storage can still be read", () => {
+    const shared = memoryStorage();
+    const ok = createStore(shared);
+    ok.update((d) => d.sets.push(weighIn("old", "70.0")));
+    // Window A can read but not write (out of space).
+    const full: Storage = { ...shared, getItem: (k) => shared.getItem(k), setItem: () => { throw new DOMException("full", "QuotaExceededError"); } };
+    const a = createStore(full);
+    expect(a.update((d) => d.sets.push(weighIn("unsaved", "72.4")))).toBe(false);
+    expect(a.memoryOnly).toBe(true);
+    expect(a.update((d) => (d.polarity = "light"))).toBe(false);
+    expect(a.update((d) => d.sets.push(weighIn("unsaved2", "72.5")))).toBe(false);
+    // Another window saves; a storage event makes A refresh: A's rows must stay.
+    ok.update((d) => d.sets.push(weighIn("elsewhere", "71.0")));
+    a.refresh();
+    expect(a.data.sets.map((s) => s.id)).toEqual(["old", "unsaved", "unsaved2"]);
+    expect(a.data.polarity).toBe("light");
+  });
 });
+

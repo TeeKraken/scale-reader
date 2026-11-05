@@ -208,3 +208,40 @@ describe("copying one row", () => {
     expect(table(renamed, s, { header: false, only: ["old2"] })[0][1]).toBe("71");
   });
 });
+
+describe("changing a reading's unit", () => {
+  it("starts a new column and never relabels or converts old numbers", () => {
+    const now: Field[] = [{ id: "weight", name: "Weight", unit: "lb" }];
+    const s: SavedSet[] = [
+      { id: "legacy", at: "2026-11-01T08:00", readings: [{ name: "Weight", unit: "kg", value: "70" }] },
+      { id: "kg", at: "2026-11-02T08:00", readings: [{ fieldId: "weight", name: "Weight", unit: "kg", value: "70.5" }] },
+      { id: "lb", at: "2026-11-03T08:00", readings: [{ fieldId: "weight", name: "Weight", unit: "lb", value: "155.2" }] },
+    ];
+    expect(table(now, s)).toEqual([
+      ["Date", "Weight (lb)", "Weight (kg)", "Weight (kg) (2)"],
+      ["2026-11-01 08:00", "", "", "70"],
+      ["2026-11-02 08:00", "", "70.5", ""],
+      ["2026-11-03 08:00", "155.2", "", ""],
+    ]);
+  });
+
+  it("keeps the column when only the name changes", () => {
+    const now: Field[] = [{ id: "weight", name: "Body weight", unit: "kg" }];
+    const s: SavedSet[] = [{ id: "1", at: "2026-11-02T08:00", readings: [{ fieldId: "weight", name: "Weight", unit: "kg", value: "70.5" }] }];
+    expect(table(now, s)).toEqual([["Date", "Body weight (kg)"], ["2026-11-02 08:00", "70.5"]]);
+  });
+});
+
+describe("headings are always unique", () => {
+  it("doesn't collide with names that already look numbered, or with Date", () => {
+    const f: Field[] = [
+      { id: "a", name: "Weight", unit: "kg" },
+      { id: "b", name: "Weight (kg)", unit: "" },
+      { id: "c", name: "Weight (kg) (2)", unit: "" },
+      { id: "d", name: "Date", unit: "" },
+    ];
+    const heads = table(f, [])[0];
+    expect(heads).toEqual(["Date", "Weight (kg)", "Weight (kg) (3)", "Weight (kg) (2)", "Date (2)"]);
+    expect(new Set(heads).size).toBe(heads.length);
+  });
+});

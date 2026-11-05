@@ -102,3 +102,71 @@ describe("camera", () => {
     expect(await again).toBe("cancelled");
   });
 });
+
+describe("camera: cancelling while it's starting up", () => {
+  function slowAttach() {
+    const calls: { stream: MediaStream; signal: AbortSignal; done: ReturnType<typeof deferred<void>> }[] = [];
+    const camera = createCamera({
+      getUserMedia: async () => fakeStream(),
+      attach: (stream, signal) => {
+        const done = deferred<void>();
+        // Like the page: give up when cancelled.
+        signal.addEventListener("abort", () => done.reject(new DOMException("Cancelled", "AbortError")));
+        calls.push({ stream, signal, done });
+        return done.promise;
+      },
+      detach: () => {},
+    });
+    return { camera, calls };
+  }
+  const live = (s: MediaStream) => (s as unknown as { tracks: { readyState: string }[] }).tracks[0].readyState;
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+
+  it("stops the stream straight away when cancelled while waiting for the picture, then retries cleanly", async () => {
+    const { camera, calls } = slowAttach();
+    const first = camera.start();
+    await tick();
+    expect(calls).toHaveLength(1);
+    camera.stop();
+    expect(live(calls[0].stream)).toBe("ended"); // synchronously, not when attach settles
+    expect(calls[0].signal.aborted).toBe(true);
+    const retry = camera.start();
+    await tick();
+    expect(calls).toHaveLength(2);
+    calls[1].done.resolve();
+    expect(await retry).toBe("started");
+    expect(await first).toBe("cancelled");
+    expect(live(calls[1].stream)).toBe("live");
+    expect(camera.running).toBe(true);
+  });
+
+  it("a stale start that finishes late can't touch the newer stream", async () => {
+    const calls: { stream: MediaStream; done: ReturnType<typeof deferred<void>> }[] = [];
+    const detach = vi.fn();
+    // An attach that ignores the signal (like play() already under way).
+    const camera = createCamera({
+      getUserMedia: async () => fakeStream(),
+      attach: (stream) => {
+        const done = deferred<void>();
+        calls.push({ stream, done });
+        return done.promise;
+      },
+      detach,
+    });
+    const first = camera.start();
+    await tick();
+    camera.stop();
+    expect(live(calls[0].stream)).toBe("ended");
+    const retry = camera.start();
+    await tick();
+    calls[1].done.resolve();
+    expect(await retry).toBe("started");
+    detach.mockClear();
+    calls[0].done.reject(new Error("play() interrupted"));
+    expect(await first).toBe("cancelled");
+    expect(detach).not.toHaveBeenCalled();
+    expect(live(calls[1].stream)).toBe("live");
+    // And a late success of the stale one also leaves the new stream alone.
+    expect(camera.running).toBe(true);
+  });
+});

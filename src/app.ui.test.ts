@@ -85,3 +85,55 @@ describe("setup", () => {
     expect(set.readings.every((r: { fieldId?: string }) => typeof r.fieldId === "string")).toBe(true);
   });
 });
+
+describe("another window saving while a weigh-in is half done", () => {
+  const otherWindowWrites = (change: (d: Record<string, any>) => void) => {
+    const d = JSON.parse(localStorage.getItem("scale-reader:v1") ?? "null") ?? {
+      fields: [
+        { id: "weight", name: "Weight", unit: "kg" },
+        { id: "bmi", name: "BMI", unit: "" },
+        { id: "body-fat", name: "Body fat", unit: "%" },
+        { id: "water", name: "Water", unit: "%" },
+        { id: "muscle", name: "Muscle", unit: "%" },
+      ],
+      sets: [],
+      polarity: "auto",
+      box: { x: 0.2, y: 0.35, w: 0.6, h: 0.3 },
+    };
+    change(d);
+    localStorage.setItem("scale-reader:v1", JSON.stringify(d));
+    window.dispatchEvent(new StorageEvent("storage", { key: "scale-reader:v1" }));
+  };
+
+  it("keeps a typed number when another fresh tab saves its first weigh-in", async () => {
+    vi.setSystemTime(new Date(2026, 10, 4, 8, 0));
+    await openApp(); // nothing saved yet in either window
+    type(readingInputs()[0], "72.4");
+    otherWindowWrites((d) => d.sets.push({ id: "a1", at: "2026-11-04T07:50", readings: [{ fieldId: "weight", name: "Weight", unit: "kg", value: "73.0" }] }));
+    expect(readingInputs()[0].value).toBe("72.4");
+    expect(document.querySelectorAll(".entry")).toHaveLength(1);
+    save();
+    expect(saved().sets.map((s: { readings: { value: string }[] }) => s.readings[0].value)).toEqual(["73.0", "72.4"]);
+  });
+
+  it("keeps a number whose reading another window removed, says so, and saves it as it was", async () => {
+    vi.setSystemTime(new Date(2026, 10, 4, 8, 0));
+    await openApp();
+    type(readingInputs()[0], "72.4");
+    type(readingInputs()[1], "23.1");
+    otherWindowWrites((d) => {
+      d.fields = d.fields.filter((f: { id: string }) => f.id !== "weight");
+      d.fields.find((f: { id: string }) => f.id === "bmi").unit = "kg/m²";
+    });
+    const kept = document.querySelectorAll<HTMLInputElement>(".reading.kept input");
+    expect([...kept].map((i) => i.value)).toEqual(["72.4", "23.1"]);
+    await new Promise((r) => requestAnimationFrame(r));
+    expect($("#status").textContent).toMatch(/changed in another window/);
+    save();
+    const set = saved().sets[0];
+    expect(set.readings.filter((r: { value: string }) => r.value)).toEqual([
+      { fieldId: "weight", name: "Weight", unit: "kg", value: "72.4" },
+      { fieldId: "bmi", name: "BMI", unit: "", value: "23.1" },
+    ]);
+  });
+});

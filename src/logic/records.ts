@@ -52,13 +52,14 @@ export function newId(): string {
   return `${Date.now().toString(36)}${counter.toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
+/** The starting setup. Fixed ids, so two tabs opened before anything was saved agree on them. */
 export function defaultFields(): Field[] {
   return [
-    { id: newId(), name: "Weight", unit: "kg" },
-    { id: newId(), name: "BMI", unit: "" },
-    { id: newId(), name: "Body fat", unit: "%" },
-    { id: newId(), name: "Water", unit: "%" },
-    { id: newId(), name: "Muscle", unit: "%" },
+    { id: "weight", name: "Weight", unit: "kg" },
+    { id: "bmi", name: "BMI", unit: "" },
+    { id: "body-fat", name: "Body fat", unit: "%" },
+    { id: "water", name: "Water", unit: "%" },
+    { id: "muscle", name: "Muscle", unit: "%" },
   ];
 }
 
@@ -122,12 +123,16 @@ export interface Column {
 function readingKeys(set: SavedSet): string[] {
   const seen = new Map<string, number>();
   return set.readings.map((r) => {
-    if (r.fieldId) return `id:${r.fieldId}`;
-    const l = label(r);
-    const n = (seen.get(l) ?? 0) + 1;
-    seen.set(l, n);
-    return `label:${l}#${n}`;
+    // A unit change is a different measurement, so it gets its own column; a name change alone doesn't.
+    const base = r.fieldId ? fieldKey(r.fieldId, r.unit) : `label:${label(r)}`;
+    const n = (seen.get(base) ?? 0) + 1;
+    seen.set(base, n);
+    return `${base}#${n}`;
   });
+}
+
+function fieldKey(id: string, unit: string): string {
+  return `id:${id}|${unit.trim()}`;
 }
 
 /**
@@ -147,11 +152,11 @@ export function layout(fields: Field[], sets: SavedSet[]): { columns: Column[]; 
     keys.push(key);
     labels.push(l);
   };
-  for (const f of fields) add(`id:${f.id}`, label(f));
-  // Older readings saved without an id go under the current field with the same label, if there's exactly one.
+  for (const f of fields) add(`${fieldKey(f.id, f.unit)}#1`, label(f));
+  // Older readings saved without an id go under the current field with the same label (so the same unit), if there's exactly one.
   for (const f of fields) {
     const l = label(f);
-    if (fields.filter((g) => label(g) === l).length === 1) pos.set(`label:${l}#1`, pos.get(`id:${f.id}`)!);
+    if (fields.filter((g) => label(g) === l).length === 1) pos.set(`label:${l}#1`, pos.get(`${fieldKey(f.id, f.unit)}#1`)!);
   }
   // Newest first, so a removed field is headed by its most recent name.
   for (const s of sortedSets(sets)) {
@@ -160,11 +165,20 @@ export function layout(fields: Field[], sets: SavedSet[]): { columns: Column[]; 
       if (r.value !== "") add(ks[i], label(r));
     });
   }
-  const used = new Map<string, number>();
+  // Unique headings: each label keeps its own text the first time; repeats get the
+  // lowest "(n)" not already taken by any heading (real or numbered), or by "Date".
+  const taken = new Set<string>(["Date", ...labels]);
+  const emitted = new Set<string>(["Date"]);
   const columns = labels.map((base, i) => {
-    const n = (used.get(base) ?? 0) + 1;
-    used.set(base, n);
-    return { key: keys[i], heading: n === 1 ? base : `${base} (${n})` };
+    let heading = base;
+    if (emitted.has(heading)) {
+      let n = 2;
+      while (taken.has(`${base} (${n})`)) n++;
+      heading = `${base} (${n})`;
+      taken.add(heading);
+    }
+    emitted.add(heading);
+    return { key: keys[i], heading };
   });
   return { columns, find: (key) => pos.get(key) ?? -1 };
 }
