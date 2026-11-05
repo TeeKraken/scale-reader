@@ -1,0 +1,23 @@
+{
+  "name": "scale-reader",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Point your phone at a basic bathroom scale, read each number off its screen, and save them as one dated row for a spreadsheet.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "check": "tsc --noEmit && vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "jsdom": "^26.1.0",
+    "typescript": "~5.9.0",
+    "vite": "^8.0.0",
+    "vitest": "^5.0.0"
+  },
+  "packageManager": "pnpm@11.5.2"
+}
