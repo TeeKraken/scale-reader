@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Scale Reader: read the numbers off a basic bathroom scale</title>
+    <meta name="description" content="Point your phone at a basic bathroom scale, read each number off its screen, fix any that are wrong, and save them as one dated row for your spreadsheet. Stays on your phone. No account." />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#eef1ec" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#151a17" media="(prefers-color-scheme: dark)" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <div id="save-warning" class="save-warning" role="alert" hidden></div>
+    <main id="main" tabindex="-1">
+      <header class="top">
+        <h1><span class="logo" aria-hidden="true"></span>Scale Reader</h1>
+        <p class="lede">Read the numbers off your bathroom scale with your phone's camera, check them, and keep each weigh-in as one dated row you can paste into a spreadsheet.</p>
+      </header>
+
+      <div class="layout">
+      <details class="card setup" id="setup">
+        <summary><h2>Your scale's readings</h2><span class="summary-list" id="setup-summary"></span></summary>
+        <p class="hint">Most scales show several numbers one after another. List them here in the order your scale shows them, so each one you read goes in the right place. These stay saved on this phone.</p>
+        <ol class="fields" id="fields"></ol>
+        <div class="row-buttons">
+          <button type="button" class="btn btn-quiet" id="add-field">Add a reading</button>
+        </div>
+      </details>
+
+      <section class="card new" aria-labelledby="new-title">
+        <h2 id="new-title">New weigh-in</h2>
+
+        <div class="camera">
+          <div class="viewport" id="viewport" hidden>
+            <video id="video" playsinline muted autoplay></video>
+            <canvas id="photo" hidden></canvas>
+            <div
+              class="box"
+              id="box"
+              tabindex="0"
+              role="group"
+              aria-label="Reading box. Arrow keys move it, Shift and arrow keys change its size."
+            >
+              <span class="box-label" aria-hidden="true">Numbers here</span>
+              <span class="handle" id="handle" aria-hidden="true"></span>
+            </div>
+          </div>
+          <p class="hint" id="camera-hint">Start the camera, then drag the box over the numbers on the scale's screen. Your camera picture stays on your phone. It's never saved or sent anywhere.</p>
+          <div class="row-buttons">
+            <button type="button" class="btn btn-go" id="start-camera">Start camera</button>
+            <button type="button" class="btn btn-quiet" id="stop-camera" hidden>Stop camera</button>
+            <button type="button" class="btn btn-quiet" id="photo-btn">Use a photo instead</button>
+            <input id="photo-input" type="file" accept="image/*" capture="environment" hidden tabindex="-1" />
+          </div>
+          <p class="error" id="camera-error" role="alert"></p>
+
+          <div class="capture" id="capture" hidden>
+            <button type="button" class="btn btn-go btn-big" id="read-btn">Read the number</button>
+            <fieldset class="polarity">
+              <legend>The scale's numbers are</legend>
+              <label><input type="radio" name="polarity" value="auto" /> Work it out</label>
+              <label><input type="radio" name="polarity" value="dark" /> Dark on a light screen</label>
+              <label><input type="radio" name="polarity" value="light" /> Bright on a dark screen</label>
+            </fieldset>
+            <div class="saw" id="saw" hidden>
+              <canvas id="mask" aria-hidden="true"></canvas>
+              <p class="hint">What the reader saw. If the numbers don't look right here, move the box or change the setting above.</p>
+            </div>
+          </div>
+        </div>
+
+        <p class="status" id="status" aria-live="polite"></p>
+
+        <form id="set-form" novalidate>
+          <ol class="readings" id="readings"></ol>
+          <label class="when">
+            <span>Date and time</span>
+            <input type="datetime-local" id="when" required />
+          </label>
+          <p class="error" id="form-error" role="alert"></p>
+          <div class="row-buttons">
+            <button type="submit" class="btn btn-go">Save this weigh-in</button>
+            <button type="button" class="btn btn-quiet" id="clear-draft">Start over</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card saved" aria-labelledby="history-title">
+        <h2 id="history-title">Saved weigh-ins</h2>
+        <div class="row-buttons" id="history-actions">
+          <button type="button" class="btn btn-quiet" id="copy-all">Copy all for a spreadsheet</button>
+          <button type="button" class="btn btn-quiet" id="download-csv">Download CSV file</button>
+          <button type="button" class="btn btn-quiet btn-danger" id="clear-all">Delete all</button>
+        </div>
+        <p class="hint" id="copy-hint">Copied rows paste straight into Google Sheets, Excel or Numbers, one weigh-in per row, oldest first. "Copy all" includes a heading row.</p>
+        <p class="status" id="history-status" aria-live="polite"></p>
+        <ul class="history" id="history"></ul>
+        <p class="empty" id="history-empty">Nothing saved yet. Your first weigh-in will show up here.</p>
+      </section>
+
+
+      </div>
+
+      <footer class="foot">
+        <p>This app only records the numbers your scale shows. It doesn't judge them or give health advice, and it isn't a medical device.</p>
+        <p>Your weigh-ins are saved on this phone only, and the app never uploads them. Camera pictures are only looked at while you read a number; they're never saved or sent. No account or cookies. The app adds no analytics scripts and doesn't track you. Our host, Vercel, keeps request logs that can include IP addresses and the site you came from. We only look at weekly totals of requests to load the app, grouped by that site, to see whether people find it. We don't look at individual requests.</p>
+        <p>Made entirely by an AI (Claude, by Anthropic) from <a href="https://somebodybuildthis.dev/ideas/33-a-phone-app-that-reads-the-numbers-off-a-basic-bathroom-scal">an idea on Somebody Build This</a>. <a href="https://github.com/TeeKraken/scale-reader">Open source</a>.</p>
+      </footer>
+    </main>
+
+    <dialog id="copy-dialog" aria-labelledby="copy-title">
+      <form method="dialog" class="dialog-inner">
+        <h2 id="copy-title">Copy these rows</h2>
+        <p class="hint">Your browser didn't let the app copy for you. Select the text below and copy it.</p>
+        <textarea id="copy-text" rows="6" readonly spellcheck="false"></textarea>
+        <div class="row-buttons">
+          <button type="submit" class="btn btn-go">Done</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

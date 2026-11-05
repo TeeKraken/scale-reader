@@ -329,11 +329,22 @@ function readWith(img: Gray, polarity: "dark" | "light"): ReadResult {
   const { width: w, height: h } = img;
   const raw = adaptiveThreshold(img, polarity);
 
-  // Drop specks.
+  // Drop specks, and things that can't be digits: a frame around the picture
+  // (the edge of the screen or the scale's bezel caught in the box), or a blob
+  // covering most of it (the screen itself, read the wrong way round).
   const minArea = Math.max(6, Math.round(h * h * 0.0009));
+  const borderTotal = 2 * (w + h);
   const mask = new Uint8Array(w * h);
   for (const b of components(raw, w, h)) {
-    if (b.area >= minArea) for (const p of b.pixels) mask[p] = 1;
+    if (b.area < minArea || b.area > 0.45 * w * h) continue;
+    let onBorder = 0;
+    for (const p of b.pixels) {
+      const x = p % w;
+      const y = (p - x) / w;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) onBorder++;
+    }
+    if (onBorder > 0.3 * borderTotal) continue;
+    for (const p of b.pixels) mask[p] = 1;
   }
 
   const result = (text: string, digits: DigitRead[]): ReadResult => ({

@@ -95,6 +95,7 @@ const GROUPS: Group[] = [
   { name: "narrow and wide digits", vary: (r) => ({ aspect: pick(r, [0.42, 0.5, 0.62, 0.7]) }), min: 0.97 },
   { name: "close together", vary: (r) => ({ spacing: pick(r, [0.1, 0.15]) }), min: 0.97 },
   { name: "unit label beside digits", vary: () => ({ label: true }), min: 0.97 },
+  { name: "dark bezel all round the box", vary: (r) => ({ bezel: pick(r, [2, 4, 8]) }), min: 0.97 },
   {
     name: "hard: several at once",
     vary: (r) => ({
@@ -124,6 +125,7 @@ const GROUPS: Group[] = [
       ["tiny (16 px digits)", { digitH: 16 }],
       ["digits nearly touching", { spacing: 0.06 }],
       ["strong slant (0.35)", { slant: 0.35 }],
+      ["bezel on two edges only", { bezel: 6, bezelSides: "top-left" }],
     ] as [string, Partial<SynthOptions>][]
   ).map(([name, o]): Group => ({ name: `stress: ${name}`, vary: () => o, min: 0 })),
 ];

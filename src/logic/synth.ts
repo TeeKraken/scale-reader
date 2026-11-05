@@ -36,6 +36,10 @@ export interface SynthOptions {
   spacing: number;
   /** Draw a "kg" style label block to the right, smaller than the digits. */
   label: boolean;
+  /** Pixels of dark scale bezel caught around the edge of the crop (0 = none). */
+  bezel: number;
+  /** Which edges the bezel is on. */
+  bezelSides: "all" | "top-left";
 }
 
 export const DEFAULTS: SynthOptions = {
@@ -54,6 +58,8 @@ export const DEFAULTS: SynthOptions = {
   aspect: 0.55,
   spacing: 0.25,
   label: false,
+  bezel: 0,
+  bezelSides: "all",
 };
 
 const SEGS: Record<string, string> = {
@@ -242,6 +248,15 @@ export function render(text: string, partial: Partial<SynthOptions> = {}, random
       data[yy * width + xx] = Math.max(0, Math.min(255, Math.round(v)));
     }
   }
+  return o.bezel > 0 ? addBezel({ width, height, data }, o.bezel, o.bezelSides) : { width, height, data };
+}
+
+function addBezel(img: Gray, px: number, sides: "all" | "top-left"): Gray {
+  const right = sides === "all" ? px : 0;
+  const width = img.width + px + right;
+  const height = img.height + px + right;
+  const data = new Uint8Array(width * height).fill(45);
+  for (let y = 0; y < img.height; y++) data.set(img.data.subarray(y * img.width, (y + 1) * img.width), (y + px) * width + px);
   return { width, height, data };
 }
 
