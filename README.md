@@ -10,8 +10,10 @@ Point your phone at a basic (non-smart) bathroom scale, read each number off its
 
 - **Reads the scale's screen with your phone's camera.** Drag the box over the numbers, then tap "Read Weight (kg)" (or whichever reading is next) as each one shows. The number goes into the form and the app moves on to the next reading.
 - **You always check it.** Every number it reads lands in a box you can edit before anything is saved, and you can type any number yourself instead. A small picture shows what the reader saw, so you can tell when the box needs moving.
-- **Set up your scale once.** List the readings in the order your scale shows them (for example Weight kg, BMI, Body fat %, Water %, Muscle %). It's saved on the phone.
-- **One dated row per weigh-in.** A history list, "Copy row" and "Copy all for a spreadsheet" (tab-separated, so it pastes into separate cells in Google Sheets, Excel or Numbers), a CSV download, delete a weigh-in, and delete all.
+- **Set up your scale once.** List the readings in the order your scale shows them (for example Weight kg, BMI, Body fat %, Water %, Muscle %). It's saved on the phone. Each reading needs a name, and two readings can't share the same name and unit, so every column in your spreadsheet can be told apart.
+- **One dated row per weigh-in.** A history list, "Copy row" and "Copy all for a spreadsheet" (tab-separated, so it pastes into separate cells in Google Sheets, Excel or Numbers), a CSV download, delete a weigh-in, and delete all. "Copy row" uses the same columns as "Copy all", so a copied row lines up under a copied heading. A renamed reading keeps its column under its new name, and one you have removed keeps its own column, so no saved number is dropped.
+- **The date keeps up.** It starts as now, and if the app was left open (overnight, say) it catches up when you read or type the first number, unless you picked a date yourself.
+- **Safe with two tabs open.** Every change is made to the latest saved data, so a tab or home-screen app opened earlier can't undo a weigh-in saved, or bring back one deleted, in another. Other open tabs update to match without losing a weigh-in you're part-way through.
 - **Use a photo instead** if the live camera isn't available: take or pick a photo, drag the box, read.
 - **Works offline** once it has loaded, and can be added to the home screen.
 - **Private.** Weigh-ins are saved on the phone only (browser storage) and the app never uploads them. Camera pictures are only looked at in memory while a number is read, and are never saved or sent. No account, no cookies, no analytics scripts, no third-party scripts, and no tracking by the app. Like any website's host, Vercel keeps request logs that can include IP addresses and referring sites. We only look at weekly totals of requests to load the app, grouped by referring site, to see whether people find it; these count requests, not people. We don't look at individual requests.
@@ -66,8 +68,10 @@ pnpm build     # production build into dist/
 
 - `src/logic/segments.ts`: the seven-segment reader (pure functions, no DOM).
 - `src/logic/synth.ts`: draws test displays with slant, rotation, noise, blur, ghost segments, bezel and more.
-- `src/logic/records.ts`: saved data, number checking, and the tab-separated and CSV exports (formula-like text is defused so it can't run in a spreadsheet).
-- `src/main.ts`: the page: camera, reading box, form, history.
+- `src/logic/records.ts`: saved data, number checking, setup checks, and the tab-separated and CSV exports. Each saved number keeps the id of the reading it came from, and repeated headings are numbered ("Reading", "Reading (2)"). Formula-like text is defused so it can't run in a spreadsheet.
+- `src/storage.ts`: saving on the phone. Every change is applied to the latest saved data (tested with two simulated windows in `storage.test.ts`).
+- `src/camera.ts`: starting and stopping the camera. One start at a time; stopping, hiding the page, switching to a photo or saving cancels a start still waiting for permission, and a stream that turns up late is stopped at once (`camera.test.ts`).
+- `src/main.ts`: the page: reading box, form, setup, history (`app.ui.test.ts` covers the date catching up and setup checks, in jsdom).
 - `src/sw/worker.js`: offline support; the build inlines it into `/sw.js` with the exact list of files to cache.
 
 It is a static site (Vite + vanilla TypeScript) with no environment variables, secrets, backend or runtime dependencies. It's deployed on Vercel's free tier.

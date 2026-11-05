@@ -1,7 +1,9 @@
 import "./style.css";
+import { createCamera } from "./camera";
 import {
   checkValue,
   clampBox,
+  fieldProblems,
   friendlyDate,
   label,
   localStamp,
@@ -11,19 +13,26 @@ import {
   toCSV,
   toTSV,
   type Box,
+  type Data,
   type SavedSet,
 } from "./logic/records";
 import { readSevenSegment, toGray, type Polarity, type ReadResult } from "./logic/segments";
-import { load, save } from "./storage";
+import { createStore, KEY } from "./storage";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
-const data = load();
+const store = createStore();
+/** This page's copy of the saved data. Read from it; change it only through `change()`. */
+let data: Data = store.data;
+/** The reading box while it's being dragged (saved when the drag ends). */
+let box: Box = { ...data.box };
 
-// The weigh-in being filled in. Not saved until "Save this weigh-in".
+// The weigh-in being filled in, by field id. Not saved until "Save this weigh-in".
 let draft: Record<string, string> = {};
 let active = 0;
 let whenEdited = false;
+/** Readings just added in setup: their "needs a name" note waits until you've left the box. */
+const freshFields = new Set<string>();
 
 const els = {
   viewport: $("viewport"),
@@ -58,6 +67,7 @@ const els = {
   fields: $("fields"),
   addField: $<HTMLButtonElement>("add-field"),
   setup: $<HTMLDetailsElement>("setup"),
+  setupSummary: $("setup-summary"),
   saveWarning: $("save-warning"),
   copyDialog: $<HTMLDialogElement>("copy-dialog"),
   copyText: $<HTMLTextAreaElement>("copy-text"),
@@ -79,14 +89,37 @@ function h<K extends keyof HTMLElementTagNameMap>(
 
 // ---------- Saving ----------
 
-function persist() {
-  const ok = save(data);
+/**
+ * Applies a change to the latest saved data (another tab may have saved since
+ * this page loaded) and saves it. Changes refer to things by id, never by
+ * position, so they land on the right item in the latest data.
+ */
+function change(fn: (d: Data) => void) {
+  const ok = store.update(fn);
+  data = store.data;
+  if (active >= data.fields.length) active = Math.max(0, data.fields.length - 1);
   els.saveWarning.hidden = ok;
   if (!ok) {
     els.saveWarning.textContent =
       "This phone's browser isn't letting the app save (it may be in private browsing, or out of space). Anything new will be lost when you close the page. Use \"Copy all for a spreadsheet\" to keep a copy.";
   }
 }
+
+// Another tab or the installed app saved: show its changes, keeping this page's unsaved weigh-in.
+window.addEventListener("storage", (e) => {
+  if (e.key !== KEY && e.key !== null) return;
+  const focusedId = document.activeElement?.id;
+  store.refresh();
+  data = store.data;
+  if (!drag) box = { ...data.box };
+  if (active >= data.fields.length) active = Math.max(0, data.fields.length - 1);
+  renderFields();
+  renderReadings();
+  renderHistory();
+  syncPolarity();
+  applyBox();
+  if (focusedId) document.getElementById(focusedId)?.focus();
+});
 
 // ---------- The weigh-in form ----------
 
@@ -106,6 +139,7 @@ function renderReadings() {
       input.value = draft[f.id] ?? "";
       const err = h("span", { class: "field-error", id: `${id}-err` });
       input.addEventListener("input", () => {
+        if (input.value.trim()) freshenWhen();
         draft[f.id] = input.value;
         err.textContent = "";
         input.removeAttribute("aria-invalid");
@@ -127,6 +161,17 @@ function renderReadings() {
     }),
   );
   updateReadButton();
+}
+
+/**
+ * The date starts as "now" when the page opens. If the page has been left open
+ * (overnight, say), bring it up to date when the first number of a new
+ * weigh-in goes in, unless you chose a date yourself.
+ */
+function freshenWhen() {
+  if (whenEdited) return;
+  if (Object.values(draft).some((v) => v.trim())) return;
+  els.when.value = localStamp(new Date());
 }
 
 function showValueError(input: HTMLInputElement, err: HTMLElement): boolean {
@@ -180,13 +225,23 @@ els.clearDraft.addEventListener("click", () => {
 els.form.addEventListener("submit", (e) => {
   e.preventDefault();
   els.formError.textContent = "";
+  const problems = fieldProblems(data.fields);
+  if (problems.size) {
+    for (const id of problems.keys()) freshFields.delete(id);
+    els.setup.open = true;
+    renderFields();
+    els.formError.textContent =
+      "Some readings in \"Your scale's readings\" need a name, or have the same name and unit as another. Fix those first.";
+    els.fields.querySelector<HTMLInputElement>('[aria-invalid="true"]')?.focus();
+    return;
+  }
   let firstBad: HTMLInputElement | null = null;
   const readings = data.fields.map((f) => {
     const input = $<HTMLInputElement>(`r-${f.id}`);
     const ok = showValueError(input, $(`r-${f.id}-err`));
     if (!ok && !firstBad) firstBad = input;
     const c = checkValue(input.value);
-    return { name: f.name.trim() || "Reading", unit: f.unit.trim(), value: c.ok ? c.value : "" };
+    return { fieldId: f.id, name: f.name.trim(), unit: f.unit.trim(), value: c.ok ? c.value : "" };
   });
   if (firstBad) {
     els.formError.textContent = "Some readings aren't numbers. Fix the ones marked, or clear them to leave them out.";
@@ -204,8 +259,7 @@ els.form.addEventListener("submit", (e) => {
     return;
   }
   const set: SavedSet = { id: newId(), at: els.when.value, readings };
-  data.sets.push(set);
-  persist();
+  change((d) => d.sets.push(set));
   stopCamera();
   resetDraft();
   renderHistory();
@@ -222,27 +276,61 @@ function say(text: string) {
 
 // ---------- Setup: the scale's readings ----------
 
+/** Shows or clears each setup row's problem (no name, or the same name and unit as another). */
+function checkFields() {
+  const problems = fieldProblems(data.fields);
+  for (const f of data.fields) {
+    const err = document.getElementById(`f-err-${f.id}`);
+    if (!err) continue;
+    const problem = problems.get(f.id);
+    const show = problem && !(freshFields.has(f.id) && !f.name.trim()) ? problem : "";
+    err.textContent = show;
+    for (const el of [$(`f-name-${f.id}`), $(`f-unit-${f.id}`)]) {
+      if (show) el.setAttribute("aria-invalid", "true");
+      else el.removeAttribute("aria-invalid");
+    }
+  }
+}
+
 function renderFields() {
   els.fields.replaceChildren(
     ...data.fields.map((f, i) => {
-      const nameId = `f-name-${f.id}`;
-      const unitId = `f-unit-${f.id}`;
-      const name = h("input", { id: nameId, type: "text", maxlength: "40", autocomplete: "off", spellcheck: "false" });
+      const fid = f.id;
+      const name = h("input", { id: `f-name-${fid}`, type: "text", maxlength: "40", autocomplete: "off", spellcheck: "false", "aria-describedby": `f-err-${fid}` });
       name.value = f.name;
-      const unit = h("input", { id: unitId, type: "text", maxlength: "12", autocomplete: "off", spellcheck: "false", placeholder: "none" });
+      const unit = h("input", {
+        id: `f-unit-${fid}`,
+        type: "text",
+        maxlength: "12",
+        autocomplete: "off",
+        spellcheck: "false",
+        placeholder: "none",
+        "aria-describedby": `f-err-${fid}`,
+      });
       unit.value = f.unit;
-      const changed = () => {
-        persist();
+      const err = h("p", { class: "field-error", id: `f-err-${fid}` });
+      const edited = () => {
         renderReadings();
-        $("setup-summary").textContent = data.fields.map(label).join(" · ");
+        els.setupSummary.textContent = data.fields.map(label).join(" · ");
+        checkFields();
       };
       name.addEventListener("input", () => {
-        f.name = name.value;
-        changed();
+        change((d) => {
+          const g = d.fields.find((x) => x.id === fid);
+          if (g) g.name = name.value;
+        });
+        edited();
       });
       unit.addEventListener("input", () => {
-        f.unit = unit.value;
-        changed();
+        change((d) => {
+          const g = d.fields.find((x) => x.id === fid);
+          if (g) g.unit = unit.value;
+        });
+        edited();
+      });
+      name.addEventListener("input", () => {
+        // Once it has had a name, an empty name is worth pointing out.
+        if (name.value.trim()) freshFields.delete(fid);
       });
       const who = label(f);
       const up = h("button", { type: "button", class: "btn btn-quiet btn-small", "aria-label": `Move ${who} up`, disabled: i === 0 }, "Up");
@@ -256,24 +344,28 @@ function renderFields() {
         { type: "button", class: "btn btn-quiet btn-small btn-danger", "aria-label": `Remove ${who}`, disabled: data.fields.length === 1 },
         "Remove",
       );
-      const move = (to: number, focus: "up" | "down") => {
-        const [item] = data.fields.splice(i, 1);
-        data.fields.splice(to, 0, item);
-        persist();
+      const move = (by: number, focus: "up" | "down") => {
+        change((d) => {
+          const from = d.fields.findIndex((x) => x.id === fid);
+          const to = from + by;
+          if (from < 0 || to < 0 || to >= d.fields.length) return;
+          const [item] = d.fields.splice(from, 1);
+          d.fields.splice(to, 0, item);
+        });
         renderFields();
         renderReadings();
-        const btn = els.fields.querySelectorAll<HTMLButtonElement>(`.field`)[to]?.querySelector<HTMLButtonElement>(`[data-move="${focus}"]`);
-        (btn && !btn.disabled ? btn : els.fields.querySelectorAll<HTMLInputElement>("input")[to * 2])?.focus();
+        const btn = document.getElementById(`f-name-${fid}`)?.closest(".field")?.querySelector<HTMLButtonElement>(`[data-move="${focus}"]`);
+        (btn && !btn.disabled ? btn : document.getElementById(`f-name-${fid}`))?.focus();
       };
       up.dataset.move = "up";
       down.dataset.move = "down";
-      up.addEventListener("click", () => move(i - 1, "up"));
-      down.addEventListener("click", () => move(i + 1, "down"));
+      up.addEventListener("click", () => move(-1, "up"));
+      down.addEventListener("click", () => move(1, "down"));
       remove.addEventListener("click", () => {
-        data.fields.splice(i, 1);
-        delete draft[f.id];
-        if (active >= data.fields.length) active = data.fields.length - 1;
-        persist();
+        change((d) => {
+          if (d.fields.length > 1) d.fields = d.fields.filter((x) => x.id !== fid);
+        });
+        delete draft[fid];
         renderFields();
         renderReadings();
         els.addField.focus();
@@ -284,21 +376,25 @@ function renderFields() {
         h("span", { class: "num", "aria-hidden": "true" }, String(i + 1)),
         h("label", { class: "field-name" }, h("span", {}, "Name"), name),
         h("label", { class: "field-unit" }, h("span", {}, "Unit"), unit),
+        err,
         h("div", { class: "field-buttons" }, up, down, remove),
       );
     }),
   );
+  checkFields();
   els.addField.disabled = data.fields.length >= 20;
-  $("setup-summary").textContent = data.fields.map(label).join(" · ");
+  els.setupSummary.textContent = data.fields.map(label).join(" · ");
 }
 
 els.addField.addEventListener("click", () => {
-  data.fields.push({ id: newId(), name: "", unit: "" });
-  persist();
+  const id = newId();
+  freshFields.add(id);
+  change((d) => {
+    if (d.fields.length < 20) d.fields.push({ id, name: "", unit: "" });
+  });
   renderFields();
   renderReadings();
-  const inputs = els.fields.querySelectorAll<HTMLInputElement>(".field-name input");
-  inputs[inputs.length - 1]?.focus();
+  document.getElementById(`f-name-${id}`)?.focus();
 });
 
 // ---------- Saved weigh-ins ----------
@@ -316,11 +412,16 @@ function renderHistory() {
         { type: "button", class: "btn btn-quiet btn-small btn-danger", "aria-label": `Delete the weigh-in for ${friendlyDate(s.at)}` },
         "Delete",
       );
-      copy.addEventListener("click", () => copyText(toTSV(table(data.fields, [s], false)), "Copied that row. Paste it into the next empty row of your spreadsheet."));
+      copy.addEventListener("click", () =>
+        // Same columns as "Copy all" (worked out from every saved weigh-in), so the row lines up under that heading.
+        copyText(
+          toTSV(table(data.fields, data.sets, { header: false, only: [s.id] })),
+          "Copied that row, in the same columns as \"Copy all\". Paste it into the next empty row of your spreadsheet. If you've changed your readings since you last copied all, copy all again for an up-to-date heading.",
+        ),
+      );
       del.addEventListener("click", () => {
         if (!confirm(`Delete the weigh-in for ${friendlyDate(s.at)}? This can't be undone.`)) return;
-        data.sets = data.sets.filter((x) => x.id !== s.id);
-        persist();
+        change((d) => (d.sets = d.sets.filter((x) => x.id !== s.id)));
         renderHistory();
         els.historyStatus.textContent = "Deleted.";
         (els.history.querySelector<HTMLButtonElement>("button") ?? els.historyEmpty).focus?.();
@@ -334,7 +435,9 @@ function renderHistory() {
           { class: "entry-values" },
           ...s.readings
             .filter((r) => r.value !== "")
-            .map((r) => h("li", {}, h("span", { class: "k" }, r.name), " ", h("span", { class: "v" }, r.value + (r.unit ? ` ${r.unit}` : "")))),
+            .map((r) =>
+              h("li", {}, h("span", { class: "k" }, r.name || "Reading"), " ", h("span", { class: "v" }, r.value + (r.unit ? ` ${r.unit}` : ""))),
+            ),
         ),
         h("div", { class: "entry-buttons" }, copy, del),
       );
@@ -373,8 +476,7 @@ els.downloadCsv.addEventListener("click", () => {
 els.clearAll.addEventListener("click", () => {
   const n = data.sets.length;
   if (!confirm(`Delete all ${n} saved ${n === 1 ? "weigh-in" : "weigh-ins"} from this phone? This can't be undone. Copy or download them first if you want to keep them.`)) return;
-  data.sets = [];
-  persist();
+  change((d) => (d.sets = []));
   renderHistory();
   els.historyStatus.textContent = "Deleted all saved weigh-ins.";
   els.historyEmpty.focus();
@@ -382,8 +484,31 @@ els.clearAll.addEventListener("click", () => {
 
 // ---------- Camera and photo ----------
 
-let stream: MediaStream | null = null;
 let source: "video" | "photo" | null = null;
+
+const IDLE_HINT =
+  "Start the camera, then drag the box over the numbers on the scale's screen. Your camera picture stays on your phone. It's never saved or sent anywhere.";
+
+const camera = createCamera({
+  getUserMedia: () =>
+    navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+    }),
+  attach: async (stream) => {
+    els.video.srcObject = stream;
+    await new Promise<void>((resolve, reject) => {
+      if (els.video.readyState >= 1) return resolve();
+      const timer = setTimeout(() => reject(new Error("The camera sent no picture")), 15_000);
+      els.video.addEventListener("loadedmetadata", () => (clearTimeout(timer), resolve()), { once: true });
+      els.video.addEventListener("error", () => (clearTimeout(timer), reject(new Error("The video failed"))), { once: true });
+    });
+    await els.video.play();
+  },
+  detach: () => {
+    els.video.srcObject = null;
+  },
+});
 
 function showViewport(kind: "video" | "photo", width: number, height: number) {
   source = kind;
@@ -399,53 +524,57 @@ function showViewport(kind: "video" | "photo", width: number, height: number) {
   applyBox();
 }
 
+function hideViewport() {
+  source = null;
+  els.viewport.hidden = true;
+  els.capture.hidden = true;
+  els.saw.hidden = true;
+  els.cameraHint.textContent = IDLE_HINT;
+}
+
+/** Start while idle; "Starting camera…" (off) while waiting, with Cancel; Stop while running. */
+function showCameraButtons() {
+  els.start.hidden = camera.running;
+  els.start.disabled = camera.pending;
+  els.start.textContent = camera.pending ? "Starting camera…" : "Start camera";
+  els.stop.hidden = !camera.running && !camera.pending;
+  els.stop.textContent = camera.pending ? "Cancel" : "Stop camera";
+}
+
 async function startCamera() {
+  if (camera.pending || camera.running) return;
   els.cameraError.textContent = "";
   if (!navigator.mediaDevices?.getUserMedia) {
     els.cameraError.textContent = "This browser can't use the camera here. Use a photo instead, or type the numbers.";
     return;
   }
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
-    });
-  } catch (err) {
-    const name = (err as DOMException)?.name;
+  // Only one start at a time: the button stays off until this one finishes or is cancelled.
+  const pendingStart = camera.start();
+  showCameraButtons();
+  const result = await pendingStart;
+  if (result === "busy" || result === "cancelled") return;
+  if (result !== "started") {
+    const name = result.stage === "permission" ? (result.error as DOMException)?.name : "";
     els.cameraError.textContent =
       name === "NotAllowedError"
         ? "The camera wasn't allowed. To use it, allow camera access for this site in your browser settings. You can also use a photo, or type the numbers."
         : name === "NotFoundError"
           ? "No camera was found. Use a photo instead, or type the numbers."
-          : "The camera couldn't start. Close other apps using it and try again, or type the numbers.";
+          : "The camera couldn't start. Close other apps using it and try again, or use a photo, or type the numbers.";
+    if (source === "video") hideViewport();
+    showCameraButtons();
     return;
   }
-  els.video.srcObject = stream;
-  await new Promise<void>((resolve) => {
-    if (els.video.readyState >= 1) resolve();
-    else els.video.addEventListener("loadedmetadata", () => resolve(), { once: true });
-  });
-  await els.video.play().catch(() => undefined);
   showViewport("video", els.video.videoWidth || 16, els.video.videoHeight || 9);
-  els.start.hidden = true;
-  els.stop.hidden = false;
+  showCameraButtons();
   els.readBtn.focus();
 }
 
+/** Stops the camera, and cancels a start that's still waiting for permission. */
 function stopCamera() {
-  if (stream) for (const t of stream.getTracks()) t.stop();
-  stream = null;
-  els.video.srcObject = null;
-  els.start.hidden = false;
-  els.stop.hidden = true;
-  if (source === "video") {
-    source = null;
-    els.viewport.hidden = true;
-    els.capture.hidden = true;
-    els.saw.hidden = true;
-    els.cameraHint.textContent =
-      "Start the camera, then drag the box over the numbers on the scale's screen. Your camera picture stays on your phone. It's never saved or sent anywhere.";
-  }
+  camera.stop();
+  if (source === "video") hideViewport();
+  showCameraButtons();
 }
 
 els.start.addEventListener("click", () => void startCamera());
@@ -453,9 +582,9 @@ els.stop.addEventListener("click", () => {
   stopCamera();
   els.start.focus();
 });
-// Don't keep the camera on in the background.
+// Don't keep the camera on (or let a waiting start turn it on) in the background.
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden && stream) stopCamera();
+  if (document.hidden && (camera.running || camera.pending)) stopCamera();
 });
 
 els.photoBtn.addEventListener("click", () => els.photoInput.click());
@@ -464,6 +593,7 @@ els.photoInput.addEventListener("change", async () => {
   els.photoInput.value = "";
   if (!file) return;
   els.cameraError.textContent = "";
+  stopCamera();
   try {
     const bitmap = await createImageBitmap(file);
     const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
@@ -475,7 +605,7 @@ els.photoInput.addEventListener("change", async () => {
     els.cameraError.textContent = "That photo couldn't be opened. Try another one, or type the numbers.";
     return;
   }
-  stopCamera();
+  stopCamera(); // in case Start was pressed while the photo was opening
   showViewport("photo", els.photo.width, els.photo.height);
   els.readBtn.focus();
 });
@@ -483,15 +613,19 @@ els.photoInput.addEventListener("change", async () => {
 // ---------- The reading box ----------
 
 function applyBox() {
-  const b = data.box;
-  Object.assign(els.box.style, { left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` });
+  Object.assign(els.box.style, { left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.w * 100}%`, height: `${box.h * 100}%` });
+}
+
+function saveBox() {
+  const b = { ...box };
+  change((d) => (d.box = b));
 }
 
 let drag: { mode: "move" | "resize"; startX: number; startY: number; start: Box; id: number } | null = null;
 
 els.box.addEventListener("pointerdown", (e) => {
   const mode = e.target === els.handle ? "resize" : "move";
-  drag = { mode, startX: e.clientX, startY: e.clientY, start: { ...data.box }, id: e.pointerId };
+  drag = { mode, startX: e.clientX, startY: e.clientY, start: { ...box }, id: e.pointerId };
   els.box.setPointerCapture(e.pointerId);
   e.preventDefault();
 });
@@ -501,13 +635,16 @@ els.box.addEventListener("pointermove", (e) => {
   const dx = (e.clientX - drag.startX) / r.width;
   const dy = (e.clientY - drag.startY) / r.height;
   const s = drag.start;
-  data.box = drag.mode === "move" ? clampBox({ ...s, x: s.x + dx, y: s.y + dy }) : clampBox({ ...s, w: Math.min(1 - s.x, s.w + dx), h: Math.min(1 - s.y, s.h + dy) });
+  box =
+    drag.mode === "move"
+      ? clampBox({ ...s, x: s.x + dx, y: s.y + dy })
+      : clampBox({ ...s, w: Math.min(1 - s.x, s.w + dx), h: Math.min(1 - s.y, s.h + dy) });
   applyBox();
 });
 const endDrag = (e: PointerEvent) => {
   if (!drag || e.pointerId !== drag.id) return;
   drag = null;
-  persist();
+  saveBox();
 };
 els.box.addEventListener("pointerup", endDrag);
 els.box.addEventListener("pointercancel", endDrag);
@@ -517,21 +654,27 @@ els.box.addEventListener("keydown", (e) => {
   const d = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[e.key];
   if (!d) return;
   e.preventDefault();
-  const b = data.box;
-  data.box = e.shiftKey ? clampBox({ ...b, w: Math.min(1 - b.x, b.w + d[0]), h: Math.min(1 - b.y, b.h + d[1]) }) : clampBox({ ...b, x: b.x + d[0], y: b.y + d[1] });
+  const b = box;
+  box = e.shiftKey
+    ? clampBox({ ...b, w: Math.min(1 - b.x, b.w + d[0]), h: Math.min(1 - b.y, b.h + d[1]) })
+    : clampBox({ ...b, x: b.x + d[0], y: b.y + d[1] });
   applyBox();
-  persist();
+  saveBox();
 });
 
 // ---------- Reading a number ----------
 
 const polarityInputs = document.querySelectorAll<HTMLInputElement>('input[name="polarity"]');
+function syncPolarity() {
+  polarityInputs.forEach((input) => {
+    input.checked = input.value === data.polarity;
+  });
+}
 polarityInputs.forEach((input) => {
-  input.checked = input.value === data.polarity;
   input.addEventListener("change", () => {
     if (!input.checked) return;
-    data.polarity = input.value as Polarity;
-    persist();
+    const p = input.value as Polarity;
+    change((d) => (d.polarity = p));
   });
 });
 
@@ -541,11 +684,10 @@ function cropGray() {
   const sw = source === "video" ? els.video.videoWidth : els.photo.width;
   const sh = source === "video" ? els.video.videoHeight : els.photo.height;
   if (!sw || !sh) return null;
-  const b = data.box;
-  const cx = Math.round(b.x * sw);
-  const cy = Math.round(b.y * sh);
-  const cw = Math.max(1, Math.round(b.w * sw));
-  const ch = Math.max(1, Math.round(b.h * sh));
+  const cx = Math.round(box.x * sw);
+  const cy = Math.round(box.y * sh);
+  const cw = Math.max(1, Math.round(box.w * sw));
+  const ch = Math.max(1, Math.round(box.h * sh));
   const scale = Math.min(1, 200 / ch);
   const canvas = document.createElement("canvas");
   canvas.width = Math.max(1, Math.round(cw * scale));
@@ -587,7 +729,7 @@ els.readBtn.addEventListener("click", () => {
     say(`Couldn't find a number in the box. Move the box so it covers just the numbers, or type ${label(f)} yourself.`);
     return;
   }
-  if (!Object.values(draft).some((v) => v.trim()) && !whenEdited) els.when.value = localStamp(new Date());
+  freshenWhen();
   draft[f.id] = r.text;
   input.value = r.text;
   showValueError(input, $(`r-${f.id}-err`));
@@ -610,19 +752,20 @@ els.readBtn.addEventListener("click", () => {
 
 // ---------- Start ----------
 
+const firstVisit = (() => {
+  try {
+    return !window.localStorage.getItem(KEY);
+  } catch {
+    return false;
+  }
+})();
 els.when.value = localStamp(new Date());
 renderReadings();
 renderFields();
 renderHistory();
-if (!data.sets.length && !localStorageHasData()) els.setup.open = true;
-
-function localStorageHasData() {
-  try {
-    return !!window.localStorage.getItem("scale-reader:v1");
-  } catch {
-    return false;
-  }
-}
+syncPolarity();
+applyBox();
+if (firstVisit) els.setup.open = true;
 
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
   window.addEventListener("load", () => {

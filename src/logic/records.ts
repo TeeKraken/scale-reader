@@ -11,8 +11,12 @@ export interface Field {
   unit: string;
 }
 
-/** One saved number. `value` is "" when that reading was skipped. */
+/**
+ * One saved number. `value` is "" when that reading was skipped. `fieldId` ties
+ * it to the setup entry it came from (absent in data saved before ids were kept).
+ */
 export interface Reading {
+  fieldId?: string;
   name: string;
   unit: string;
   value: string;
@@ -107,31 +111,100 @@ export function sortedSets(sets: SavedSet[]): SavedSet[] {
   return [...sets].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
 }
 
-/**
- * Spreadsheet columns: the current readings first, then any older ones that
- * were renamed or removed since, so no saved number is left out.
- */
-export function columns(fields: Field[], sets: SavedSet[]): string[] {
-  const out: string[] = [];
-  const add = (l: string) => {
-    if (!out.includes(l)) out.push(l);
-  };
-  for (const f of fields) add(label(f));
-  for (const s of sortedSets(sets).reverse()) for (const r of s.readings) if (r.value !== "") add(label(r));
-  return out;
+export interface Column {
+  /** Which readings belong here: a field id, or for older data its label and position. */
+  key: string;
+  /** The heading, made unique ("Reading", "Reading (2)"). */
+  heading: string;
 }
 
-/** Rows for a spreadsheet, oldest first: a header, then one row per set. */
-export function table(fields: Field[], sets: SavedSet[], header = true): string[][] {
-  const cols = columns(fields, sets);
+/** The column a saved reading belongs in. Readings without a field id go by label, and repeats of a label in one set get their own columns. */
+function readingKeys(set: SavedSet): string[] {
+  const seen = new Map<string, number>();
+  return set.readings.map((r) => {
+    if (r.fieldId) return `id:${r.fieldId}`;
+    const l = label(r);
+    const n = (seen.get(l) ?? 0) + 1;
+    seen.set(l, n);
+    return `label:${l}#${n}`;
+  });
+}
+
+/**
+ * Spreadsheet columns, from the whole history: the current readings first,
+ * then any older ones that were renamed or removed since, so no saved number is
+ * left out. Every export (all rows or one) uses this same layout, so a copied
+ * row lines up under a copied heading. Returns the columns and a lookup from a
+ * reading's key to its column.
+ */
+export function layout(fields: Field[], sets: SavedSet[]): { columns: Column[]; find: (key: string) => number } {
+  const labels: string[] = [];
+  const keys: string[] = [];
+  const pos = new Map<string, number>();
+  const add = (key: string, l: string) => {
+    if (pos.has(key)) return;
+    pos.set(key, labels.length);
+    keys.push(key);
+    labels.push(l);
+  };
+  for (const f of fields) add(`id:${f.id}`, label(f));
+  // Older readings saved without an id go under the current field with the same label, if there's exactly one.
+  for (const f of fields) {
+    const l = label(f);
+    if (fields.filter((g) => label(g) === l).length === 1) pos.set(`label:${l}#1`, pos.get(`id:${f.id}`)!);
+  }
+  // Newest first, so a removed field is headed by its most recent name.
+  for (const s of sortedSets(sets)) {
+    const ks = readingKeys(s);
+    s.readings.forEach((r, i) => {
+      if (r.value !== "") add(ks[i], label(r));
+    });
+  }
+  const used = new Map<string, number>();
+  const columns = labels.map((base, i) => {
+    const n = (used.get(base) ?? 0) + 1;
+    used.set(base, n);
+    return { key: keys[i], heading: n === 1 ? base : `${base} (${n})` };
+  });
+  return { columns, find: (key) => pos.get(key) ?? -1 };
+}
+
+/** Rows for a spreadsheet, oldest first: a heading row, then one row per set in `only` (default: all). */
+export function table(fields: Field[], sets: SavedSet[], options: { header?: boolean; only?: string[] } = {}): string[][] {
+  const { header = true, only } = options;
+  const { columns, find } = layout(fields, sets);
   const rows = sortedSets(sets)
     .reverse()
+    .filter((s) => !only || only.includes(s.id))
     .map((s) => {
-      const byLabel = new Map<string, string>();
-      for (const r of s.readings) if (r.value !== "") byLabel.set(label(r), r.value);
-      return [sheetDate(s.at), ...cols.map((c) => byLabel.get(c) ?? "")];
+      const cells = columns.map(() => "");
+      const ks = readingKeys(s);
+      s.readings.forEach((r, i) => {
+        const at = find(ks[i]);
+        if (r.value !== "" && at >= 0) cells[at] = r.value;
+      });
+      return [sheetDate(s.at), ...cells];
     });
-  return header ? [["Date", ...cols], ...rows] : rows;
+  return header ? [["Date", ...columns.map((c) => c.heading)], ...rows] : rows;
+}
+
+/**
+ * Problems with the setup list, by field id: a reading needs a name, and two
+ * readings can't share the same name and unit (they'd be impossible to tell apart).
+ */
+export function fieldProblems(fields: Field[]): Map<string, string> {
+  const out = new Map<string, string>();
+  const seen = new Map<string, number>();
+  for (const f of fields) {
+    const k = `${f.name.trim().toLowerCase()}|${f.unit.trim().toLowerCase()}`;
+    seen.set(k, (seen.get(k) ?? 0) + 1);
+  }
+  for (const f of fields) {
+    if (!f.name.trim()) out.set(f.id, "Give this reading a name, like Weight.");
+    else if ((seen.get(`${f.name.trim().toLowerCase()}|${f.unit.trim().toLowerCase()}`) ?? 0) > 1)
+      out.set(f.id, "Another reading has the same name and unit. Change one of them so they can be told apart.");
+  }
+  return out;
 }
 
 /** Stops a name like "=SUM(...)" being run as a formula when pasted or opened. */
@@ -166,7 +239,12 @@ export function parseData(raw: unknown): Data {
       .filter((f): f is Record<string, unknown> => !!f && typeof f === "object")
       .map((f) => ({ id: str(f.id, 40) || newId(), name: str(f.name, 40), unit: str(f.unit, 12) }))
       .slice(0, 20);
-    d.fields = fields;
+    const ids = new Set<string>();
+    for (const f of fields) {
+      if (ids.has(f.id)) f.id = newId();
+      ids.add(f.id);
+    }
+    if (fields.length) d.fields = fields;
   }
 
   if (Array.isArray(o.sets)) {
@@ -180,7 +258,10 @@ export function parseData(raw: unknown): Data {
               .filter((r): r is Record<string, unknown> => !!r && typeof r === "object")
               .map((r) => {
                 const c = checkValue(str(r.value, 20));
-                return { name: str(r.name, 40), unit: str(r.unit, 12), value: c.ok ? c.value : "" };
+                const reading: Reading = { name: str(r.name, 40), unit: str(r.unit, 12), value: c.ok ? c.value : "" };
+                const fieldId = str(r.fieldId, 40);
+                if (fieldId) reading.fieldId = fieldId;
+                return reading;
               })
               .slice(0, 20)
           : [],
