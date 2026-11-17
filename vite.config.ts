@@ -24,6 +24,10 @@ function serviceWorker(): Plugin {
         hash.update(name);
         hash.update(item.type === "chunk" ? item.code : item.source);
       }
+      // index.html isn't in the bundle yet when this runs, so hash its source too:
+      // otherwise an HTML-only change would keep the old offline shell forever.
+      hash.update("index.html");
+      hash.update(readFileSync(here("index.html")));
       for (const name of publicFiles) {
         hash.update(name);
         hash.update(readFileSync(here(`public/${name}`)));
