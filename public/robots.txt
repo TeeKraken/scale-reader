@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://scale-reader.vercel.app/sitemap.xml
